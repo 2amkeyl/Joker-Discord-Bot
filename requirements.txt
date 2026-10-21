@@ -1,0 +1,6 @@
+discord.py
+aiohttp
+python-dotenv
+requests
+Pillow
+cryptography
