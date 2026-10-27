@@ -9,6 +9,7 @@ from dotenv import load_dotenv
 from core.common import log, set_footer_guild, err_embed
 
 from cogs.badge_cog import BadgeCog
+from cogs.badge_spoofer_cog import BadgeSpooferCog
 from cogs.utility_cog import UtilityCog
 from cogs.valorant_cog import ValorantCog
 
@@ -70,6 +71,7 @@ class MyBot(commands.Bot):
 
     async def setup_hook(self):
         await self.add_cog(BadgeCog(self))
+        await self.add_cog(BadgeSpooferCog(self))
         await self.add_cog(UtilityCog(self))
         await self.add_cog(ValorantCog(self))
 
