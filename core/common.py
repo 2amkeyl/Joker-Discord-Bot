@@ -1,63 +1,150 @@
-import contextvars
+"""Tiện ích dùng chung: embed, logging và đọc/ghi JSON an toàn."""
+from __future__ import annotations
+
+import asyncio
+import contextlib
 import json
+import logging
 import os
 import random
+import sys
+import tempfile
 import time
-import asyncio
-from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
 import discord
 
 ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
-VN_TZ = timezone(timedelta(hours=7))
-
 EMBED_COLOR = 0xE60012
 ERROR_COLOR = 0xFFB000
 FOOTER_TEXT = "Joker • Phantom Thieves of Hearts"
 
-RANDOM_GIFS = [
+_DEFAULT_GIFS = [
     "https://i.pinimg.com/originals/1e/12/1c/1e121c1f64dcb8c549a7fe13264cfe1d.gif",
     "https://i.pinimg.com/originals/08/a4/a8/08a4a843a478531cb22606971da3c9bb.gif",
 ]
 
-current_footer_ctx: contextvars.ContextVar[str] = contextvars.ContextVar("current_footer_ctx", default=FOOTER_TEXT)
 
-def set_footer_guild(guild: Optional[discord.Guild]):
-    current_footer_ctx.set(f"Joker • {guild.name}" if guild else FOOTER_TEXT)
+# ==========================================
+# EMBED
+# ==========================================
 
-def make_embed(description: str, *, title: str = None, color: int = EMBED_COLOR, gif: bool = False, guild: Optional[discord.Guild] = None) -> discord.Embed:
+def _gif_pool() -> list[str]:
+    # Đặt JOKER_GIFS="url1,url2" trong .env để dùng GIF tự host thay cho link pinimg.
+    custom = [u.strip() for u in os.getenv("JOKER_GIFS", "").split(",") if u.strip()]
+    return custom or _DEFAULT_GIFS
+
+
+def footer_text(guild: Optional[discord.Guild] = None) -> str:
+    return f"Joker • {guild.name}" if guild else FOOTER_TEXT
+
+
+def make_embed(
+    description: str,
+    *,
+    title: Optional[str] = None,
+    color: int = EMBED_COLOR,
+    gif: bool = False,
+    guild: Optional[discord.Guild] = None,
+) -> discord.Embed:
     embed = discord.Embed(description=description, color=color)
     if title:
         embed.title = title
-
-    footer_text = f"Joker • {guild.name}" if guild else current_footer_ctx.get()
-    embed.set_footer(text=footer_text)
-
-    if gif and RANDOM_GIFS:
-        embed.set_image(url=random.choice(RANDOM_GIFS))
-
+    embed.set_footer(text=footer_text(guild))
+    if gif:
+        embed.set_image(url=random.choice(_gif_pool()))
     return embed
+
 
 def err_embed(text: str, guild: Optional[discord.Guild] = None) -> discord.Embed:
     return make_embed(text, color=ERROR_COLOR, guild=guild)
 
-class Colors:
-    RESET  = "\033[0m"
-    GREEN  = "\033[92m"
-    YELLOW = "\033[93m"
-    RED    = "\033[91m"
-    CYAN   = "\033[96m"
-    DIM    = "\033[2m"
 
-DEBUG = True
+# ==========================================
+# LOGGING
+# ==========================================
 
-def log(msg: str, level: str = "info"):
-    ts = datetime.now().strftime("%H:%M:%S")
-    prefix = {"info": f"{Colors.CYAN}[INFO]{Colors.RESET}", "ok": f"{Colors.GREEN}[  OK]{Colors.RESET}", "warn": f"{Colors.YELLOW}[WARN]{Colors.RESET}", "error": f"{Colors.RED}[ ERR]{Colors.RESET}", "debug": f"{Colors.DIM}[DBG ]{Colors.RESET}"}.get(level, f"[{level.upper()}]")
-    if level == "debug" and not DEBUG: return
-    print(f"{Colors.DIM}{ts}{Colors.RESET} {prefix} {msg}")
+_LOGGER_NAME = "joker"
+_logger = logging.getLogger(_LOGGER_NAME)
+
+OK = 25  # nằm giữa INFO (20) và WARNING (30)
+logging.addLevelName(OK, "OK")
+
+_LEVELS = {
+    "debug": logging.DEBUG,
+    "info": logging.INFO,
+    "ok": OK,
+    "warn": logging.WARNING,
+    "warning": logging.WARNING,
+    "error": logging.ERROR,
+}
+_TAGS = {
+    logging.DEBUG: "DBG ",
+    logging.INFO: "INFO",
+    OK: "  OK",
+    logging.WARNING: "WARN",
+    logging.ERROR: " ERR",
+    logging.CRITICAL: "CRIT",
+}
+_RESET, _DIM = "\033[0m", "\033[2m"
+_COLORS = {
+    logging.DEBUG: _DIM,
+    logging.INFO: "\033[96m",
+    OK: "\033[92m",
+    logging.WARNING: "\033[93m",
+    logging.ERROR: "\033[91m",
+    logging.CRITICAL: "\033[91m",
+}
+
+
+class _Formatter(logging.Formatter):
+    def __init__(self, color: bool):
+        super().__init__("%(dim)s%(asctime)s%(reset)s %(tag)s %(prefix)s%(message)s", "%H:%M:%S")
+        self.color = color
+
+    def format(self, record: logging.LogRecord) -> str:
+        tag = _TAGS.get(record.levelno, record.levelname[:4])
+        if self.color:
+            record.dim, record.reset = _DIM, _RESET
+            tag = f"{_COLORS.get(record.levelno, '')}[{tag}]{_RESET}"
+        else:
+            record.dim = record.reset = ""
+            tag = f"[{tag}]"
+        record.tag = tag
+        record.prefix = "" if record.name == _LOGGER_NAME else f"{record.name}: "
+        return super().format(record)
+
+
+def setup_logging() -> None:
+    """Gom log của Joker và discord.py vào cùng một handler. Gọi một lần ở main().
+
+    Biến môi trường: DEBUG=1 để bật log debug, NO_COLOR=1 để tắt mã màu ANSI.
+    Màu cũng tự tắt khi stdout không phải terminal (nohup, ghi ra file...).
+    """
+    debug = os.getenv("DEBUG", "").strip().lower() in {"1", "true", "yes", "on"}
+    use_color = sys.stdout.isatty() and "NO_COLOR" not in os.environ
+
+    handler = logging.StreamHandler(sys.stdout)
+    handler.setFormatter(_Formatter(use_color))
+
+    root = logging.getLogger()
+    root.handlers[:] = [handler]  # gọi lại nhiều lần cũng không bị nhân đôi log
+    root.setLevel(logging.INFO)
+    _logger.setLevel(logging.DEBUG if debug else logging.INFO)
+
+
+def log(msg: str, level: str = "info") -> None:
+    _logger.log(_LEVELS.get(level, logging.INFO), msg)
+
+
+def log_exc(msg: str, exc: BaseException) -> None:
+    _logger.error(msg, exc_info=exc)
+
+
+# ==========================================
+# JSON
+# ==========================================
 
 def read_json(path: str, default: Any = None, *, label: Optional[str] = None) -> Any:
     if not os.path.exists(path):
@@ -65,58 +152,53 @@ def read_json(path: str, default: Any = None, *, label: Optional[str] = None) ->
     try:
         with open(path, "r", encoding="utf-8") as f:
             return json.load(f)
-    except (json.JSONDecodeError, OSError, ValueError) as e:
+    except (OSError, ValueError) as e:  # JSONDecodeError và UnicodeDecodeError đều là ValueError
         log(f"Không đọc được {label or os.path.basename(path)}, dùng dữ liệu mặc định: {e}", "warn")
         if isinstance(e, ValueError):
-            try:
-                os.replace(path, path + ".corrupt")
-            except OSError:
-                pass
+            with contextlib.suppress(OSError):
+                os.replace(path, f"{path}.{int(time.time())}.corrupt")
         return default
 
-def write_json_atomic(path: str, data: Any, *, mode: int = 0o666, **dump_kwargs) -> None:
-    tmp = path + ".tmp"
+
+def _fsync_dir(directory: str) -> None:
+    if os.name == "nt":
+        return
     try:
-        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, mode)
+        fd = os.open(directory, os.O_RDONLY)
+    except OSError:
+        return
+    try:
+        os.fsync(fd)
+    except OSError:
+        pass
+    finally:
+        os.close(fd)
+
+
+def write_json_atomic(path: str, data: Any, *, mode: int = 0o600, **dump_kwargs) -> None:
+    directory = os.path.dirname(os.path.abspath(path))
+    os.makedirs(directory, exist_ok=True)
+    # File tạm riêng cho mỗi lần ghi, nên hai lần ghi đồng thời vào cùng một path không đè nhau.
+    fd, tmp = tempfile.mkstemp(dir=directory, prefix=os.path.basename(path) + ".", suffix=".tmp")
+    try:
         with os.fdopen(fd, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, **dump_kwargs)
             f.flush()
             os.fsync(f.fileno())
+        os.chmod(tmp, mode)
         os.replace(tmp, path)
-    except Exception:
-        try:
+    except BaseException:
+        with contextlib.suppress(OSError):
             os.remove(tmp)
-        except OSError:
-            pass
         raise
+    _fsync_dir(directory)
 
 
-class GlobalRateLimiter:
-    def __init__(self, max_per_second: float = 35):
-        self.max_per_second = max_per_second
-        self._lock: Optional[asyncio.Lock] = None
-        self._tokens = max_per_second
-        self._last_refill = time.monotonic()
+async def aread_json(path: str, default: Any = None, *, label: Optional[str] = None) -> Any:
+    """Bản không chặn event loop của read_json."""
+    return await asyncio.to_thread(read_json, path, default, label=label)
 
-    async def acquire(self):
-        if self._lock is None:
-            self._lock = asyncio.Lock()
-        async with self._lock:
-            now = time.monotonic()
-            elapsed = now - self._last_refill
-            self._tokens = min(self.max_per_second, self._tokens + elapsed * self.max_per_second)
-            self._last_refill = now
-            if self._tokens < 1:
-                wait = (1 - self._tokens) / self.max_per_second
-                await asyncio.sleep(wait)
-                self._tokens = 0
-                self._last_refill = time.monotonic()
-            else:
-                self._tokens -= 1
 
-rate_limiter = GlobalRateLimiter()
-
-async def safe_send(channel, content: str = None, *, embed: discord.Embed = None):
-    await rate_limiter.acquire()
-    try: await channel.send(content=content, embed=embed)
-    except discord.HTTPException as e: log(f"Lỗi khi gửi tin nhắn vào kênh: {e}", "warn")
+async def awrite_json_atomic(path: str, data: Any, *, mode: int = 0o600, **dump_kwargs) -> None:
+    """Bản không chặn event loop của write_json_atomic."""
+    await asyncio.to_thread(write_json_atomic, path, data, mode=mode, **dump_kwargs)

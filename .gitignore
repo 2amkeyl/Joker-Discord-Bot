@@ -1,0 +1,39 @@
+# --- Cấu hình cục bộ ---
+.env
+.env.*
+!.env.example
+proxies.txt
+
+# --- Runtime Data ---
+*.tmp
+*.corrupt
+
+# Thư mục data
+data/*
+!data/.gitkeep
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# --- Môi trường ảo ---
+venv/
+.venv/
+env/
+
+# --- Log ---
+*.log
+nohup.out
+
+# --- Editor / hệ điều hành ---
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
